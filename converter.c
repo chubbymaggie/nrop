@@ -4,7 +4,7 @@
 
 #include "converter.h"
 
-#define DEBUG_LLVM
+//#define DEBUG_LLVM
 #ifdef DEBUG_LLVM
 #  define LOG_LLVM(...) logging(__VA_ARGS__)
 #else
@@ -28,6 +28,7 @@ struct private_converter_t
     LLVMValueRef m_memValuesPtr[TCG_MAX_TEMPS];
     LLVMBasicBlockRef m_labels[TCG_MAX_TEMPS];
     LLVMValueRef rip;
+    LLVMValueRef df;
 
     TCGContext *s;
 
@@ -81,14 +82,17 @@ static LLVMValueRef getPtrForValue(private_converter_t *this, int idx)
 
     if (this->m_memValuesPtr[idx] == NULL)
     {
-        if ((!temp.temp_allocated) && (!temp.temp_local))/*((temp.mem_allocated) || (temp.fixed_reg))*/
+        if ((!temp.temp_allocated) && (!temp.temp_local)) /*((temp.mem_allocated) || (temp.fixed_reg))*/
         {
             /*
             LLVMValueRef indices[] = { LLVMConstInt(LLVMInt64Type(), this->m_globalsIdx[idx], 0) };
             LLVMValueRef v = LLVMConstGEP(LLVMGetFirstParam(this->Fn), indices, 1);
             this->m_memValuesPtr[idx] = LLVMBuildIntToPtr(this->builder, v, tcgPtrType(temp.type), temp.name);
             */
-            LLVMValueRef v = LLVMAddGlobal(this->module, tcgType(temp.type), temp.name);
+            LLVMValueRef v;
+
+            v = LLVMAddGlobal(this->module, tcgType(temp.type), temp.name);
+
             //LLVMSetThreadLocal(v, 1);
             /* Filtering qemu cc_* */
             if ((temp.name[0] == 'c') && (temp.name[1] == 'c'))
@@ -234,6 +238,7 @@ static void tcg_to_llvm(private_converter_t *this)
     LLVMTypeRef FnType;
     LLVMTypeRef ParamTypes[1];
     LLVMBasicBlockRef bbi;
+    int i;
 
     /*
     LLVMValueRef zero = LLVMConstInt(wordType(), 0, 0);
@@ -250,6 +255,22 @@ static void tcg_to_llvm(private_converter_t *this)
     /*
     bbi = LLVMGetEntryBasicBlock(this->Fn);
     this->builder->SetInsertPoint(bb);*/
+
+    // Allocate local temps
+    for(i=this->s->nb_globals; i<TCG_MAX_TEMPS; ++i) {
+        if(this->s->temps[i].temp_local) {
+            //std::ostringstream pName;
+            //pName << "loc_" << (i - s->nb_globals) << "ptr";
+            const char *name;
+            if (this->s->temps[i].name)
+                name = this->s->temps[i].name;
+            else
+                name = "ALLOA";
+            this->m_memValuesPtr[i] = LLVMBuildAlloca(this->builder,
+                tcgType(this->s->temps[i].type), name);
+        }
+    }
+
 
     args = this->s->gen_opparam_buf;
     op_index = 0;
@@ -324,7 +345,7 @@ static void tcg_to_llvm(private_converter_t *this)
                     if (LLVMTypeOf(v2) == intType(32))                                                    \
                         adjustTypeSize(this, 32, &v1, &v2);                             \
                     v = LLVMBuildICmp(this->builder, cond,                   \
-                            v1, v2, "B");      \
+                            v1, v2, "BranchC");      \
                     }\
                 break;
 
@@ -362,7 +383,7 @@ static void tcg_to_llvm(private_converter_t *this)
 
 #define __OP_SETCOND_C(tcg_cond, cond)                              \
                 case tcg_cond:                                          \
-                    v = LLVMBuildICmp(this->builder,cond, v1, v2, "B");           \
+                    v = LLVMBuildICmp(this->builder,cond, v1, v2, "SetCond");           \
                 break;
 
 #define __OP_SETCOND(opc_name, bits)                                \
@@ -489,7 +510,7 @@ static void tcg_to_llvm(private_converter_t *this)
             else*/\
             {\
             v = LLVMBuildAdd(this->builder, getValue(this, args[1]),                  \
-                        LLVMConstInt(wordType(), args[2], 0), "A");         \
+                        LLVMConstInt(wordType(), args[2], 0), "AddLd");         \
             v = LLVMBuildIntToPtr(this->builder, v, intPtrType(memBits), "Ild");       \
             v = LLVMBuildLoad(this->builder, v, "Lld");                                \
             }\
@@ -505,7 +526,7 @@ static void tcg_to_llvm(private_converter_t *this)
                                                                             \
             if ((this->s->temps[args[1]].fixed_reg) &&\
                 (args[2] == 0x80))\
-            {\
+            { \
                 if (this->rip == NULL)\
                 {\
                     this->rip = LLVMAddGlobal(this->module, intType(64), "rip");\
@@ -517,7 +538,7 @@ static void tcg_to_llvm(private_converter_t *this)
             {\
                                                                             \
                 v = LLVMBuildAdd(this->builder, getValue(this, args[1]),                  \
-                            LLVMConstInt(wordType(), args[2], 0), "A");         \
+                            LLVMConstInt(wordType(), args[2], 0), "AddSt");         \
                 v = LLVMBuildIntToPtr(this->builder, v, intPtrType(memBits), "Ist");       \
             }\
             LLVMBuildStore(this->builder, LLVMBuildTrunc(this->builder,                 \
@@ -608,10 +629,10 @@ static void tcg_to_llvm(private_converter_t *this)
             v = LLVMBuildMul(this->builder, v1, v2, "Mul");\
                            \
             v1 = LLVMBuildAnd(this->builder, v, LLVMConstInt(intType(2*bits), mask, 0), "Andm");\
-            v1 = LLVMBuildTrunc(this->builder, v, intType(bits), "Tand");\
+            v1 = LLVMBuildTrunc(this->builder, v1, intType(bits), "Tand");\
             setValue(this, args[0], v1);\
             v1 = LLVMBuildLShr(this->builder, v,LLVMConstInt(intType(2*bits), bits, 0), "Shrm");\
-            v1 = LLVMBuildTrunc(this->builder, v, intType(bits), "Tshr");\
+            v1 = LLVMBuildTrunc(this->builder, v1, intType(bits), "Tshr");\
             setValue(this, args[1], v1);\
         } break;
 
@@ -821,7 +842,7 @@ static void tcg_to_llvm(private_converter_t *this)
             uint32_t mask = (1u << len) - 1;
             LLVMValueRef t1, ret;
             if (ofs + len < 32) {
-                t1 = LLVMBuildAnd(this->builder, arg2, LLVMConstInt(intType(32), mask, 0), "A");
+                t1 = LLVMBuildAnd(this->builder, arg2, LLVMConstInt(intType(32), mask, 0), "AddDepositC");
                 t1 = LLVMBuildShl(this->builder, t1, LLVMConstInt(intType(32), ofs, 0), "S");
                 /*
                 temp_val = ((args[2] & mask) << ofs);
@@ -833,7 +854,7 @@ static void tcg_to_llvm(private_converter_t *this)
                 */
             }
 
-            ret = LLVMBuildAnd(this->builder, arg1, LLVMConstInt(intType(32), ~(mask << ofs), 0), "A");
+            ret = LLVMBuildAnd(this->builder, arg1, LLVMConstInt(intType(32), ~(mask << ofs), 0), "AddDeposit");
             ret = LLVMBuildOr(this->builder, ret, t1, "Odep");
             /*
             ret = LLVMConstInt(intType(32), ((args[1] & ~(mask << ofs)) | temp_val), 0);
@@ -868,7 +889,7 @@ static void tcg_to_llvm(private_converter_t *this)
             uint64_t mask = (1u << len) - 1;
             LLVMValueRef t1, ret;
             if (ofs + len < 64) {
-                t1 = LLVMBuildAnd(this->builder, arg2, LLVMConstInt(intType(64), mask, 0), "A");
+                t1 = LLVMBuildAnd(this->builder, arg2, LLVMConstInt(intType(64), mask, 0), "AddDepositCx");
                 t1 = LLVMBuildShl(this->builder, t1, LLVMConstInt(intType(64), ofs, 0), "S");
                 /*
                 temp_val = ((args[2] & mask) << ofs);
@@ -880,7 +901,7 @@ static void tcg_to_llvm(private_converter_t *this)
                 */
             }
 
-            ret = LLVMBuildAnd(this->builder, arg1, LLVMConstInt(intType(64), ~(mask << ofs), 0), "A");
+            ret = LLVMBuildAnd(this->builder, arg1, LLVMConstInt(intType(64), ~(mask << ofs), 0), "AddDepositx");
             ret = LLVMBuildOr(this->builder, ret, t1, "O");
             /*
             ret = LLVMConstInt(intType(64), ((args[1] & ~(mask << ofs)) | temp_val), 0);
@@ -910,6 +931,7 @@ static void optimize_llvm(private_converter_t *this)
     error = NULL;
 
     LOG_LLVM("Verification of the module\n");
+    //this->public.dump(&this->public);
     /*LLVMVerifyModule(this->module, LLVMPrintMessageAction, &error);*/
     LLVMVerifyModule(this->module, LLVMAbortProcessAction, &error);
     LLVMDisposeMessage(error);
@@ -970,9 +992,9 @@ static void dump(private_converter_t *this)
     
     msg = LLVMPrintModuleToString(this->module);
 
-    LOG_LLVM("Dumping\n");
+    logging("Dumping\n");
     /*LLVMDumpModule(this->module);*/
-    LOG_LLVM("%s\n", msg);
+    logging("%s\n", msg);
 }
 
 /**
@@ -981,43 +1003,98 @@ static void dump(private_converter_t *this)
 Z3_ast mk_var(Z3_context ctx, const char * name, Z3_sort ty) 
 {
     Z3_symbol   s  = Z3_mk_string_symbol(ctx, name);
-    return Z3_mk_const(ctx, s, ty);
+    Z3_ast a = Z3_mk_const(ctx, s, ty);
+    return a;
 }
 
-/**
-   \brief Create a boolean variable using the given name.
-*/
-Z3_ast mk_bool_var(Z3_context ctx, const char * name) 
+uint64_t get_llvm_type_size(LLVMValueRef valueref)
 {
-    Z3_sort ty = Z3_mk_bool_sort(ctx);
-    return mk_var(ctx, name, ty);
+    uint64_t valueref_size;
+
+    if (LLVMTypeOf(valueref) == intType(256) || (LLVMTypeOf(valueref) == intPtrType(256)))
+        valueref_size = 256;
+    else if (LLVMTypeOf(valueref) == intType(128) || (LLVMTypeOf(valueref) == intPtrType(128)))
+        valueref_size = 128;
+    else if (LLVMTypeOf(valueref) == intType(64) || (LLVMTypeOf(valueref) == intPtrType(64)))
+        valueref_size = 64;
+    else if (LLVMTypeOf(valueref) == intType(32) || (LLVMTypeOf(valueref) == intPtrType(32)))
+        valueref_size = 32;
+    else if (LLVMTypeOf(valueref) == intType(16) || (LLVMTypeOf(valueref) == intPtrType(16)))
+        valueref_size = 16;
+    else if (LLVMTypeOf(valueref) == intType(8) || (LLVMTypeOf(valueref) == intPtrType(8)))
+        valueref_size = 8;
+    else if (LLVMTypeOf(valueref) == intType(1) || (LLVMTypeOf(valueref) == intPtrType(1)))
+        valueref_size = 1;
+    else
+    {
+        unsigned int bla;
+        logging("COucou %x %x %x\n", LLVMGetIntTypeWidth(LLVMTypeOf(valueref)), intType(4), intPtrType(4));
+        for (bla=1; bla<512; bla++)
+        {
+            if (LLVMTypeOf(valueref) == intType(bla))
+                printf("Helllo %x\n", bla);
+            if (LLVMTypeOf(valueref) == intPtrType(bla))
+                printf("Helllo %x\n", bla);
+        }
+
+        logging("Size not supported (%x) for %s in create_Z3_var_internal\n", LLVMGetValueName(valueref), LLVMTypeOf(valueref));
+        logging("int128:%08x pint128:%08x int64:%08x pint64:%08x int32:%08x pint32:%08x\n", intType(128), intPtrType(128), intType(64), intPtrType(64), intType(32), intPtrType(32));
+        logging("int16:%08x pint16:%08x int8:%08x pint8:%08x int1:%08x pint1:%08x\n", intType(16), intPtrType(16), intType(8), intPtrType(8), intType(1), intPtrType(1));
+        valueref_size = 0;
+
+        logging("Size Is %x == %x\n", LLVMGetIntTypeWidth(LLVMTypeOf(valueref)), valueref_size);
+    }
+
+    return valueref_size;
 }
 
-/**
-   \brief Create an integer variable using the given name.
-*/
-Z3_ast mk_int_var(Z3_context ctx, const char * name) 
+uint64_t get_z3_size(private_converter_t *this, Z3_ast z3value)
 {
-    Z3_sort ty = Z3_mk_int_sort(ctx);
-    return mk_var(ctx, name, ty);
+    Z3_sort sort;
+
+    sort = Z3_get_sort(this->ctx, z3value);
+
+    if (Z3_get_sort_kind(this->ctx, sort) != Z3_BV_SORT)
+        return 1;
+
+    return Z3_get_bv_sort_size(this->ctx, sort);
 }
 
-/**
-   \brief Create a Z3 integer node using a C int. 
-*/
-Z3_ast mk_int(Z3_context ctx, int v) 
+Z3_ast create_named_var(private_converter_t *this, Z3_symbol_cell *target_cell)
 {
-    Z3_sort ty = Z3_mk_int_sort(ctx);
-    return Z3_mk_int(ctx, v, ty);
-}
+    Z3_ast res;
+    const char *name;
+    chunk_t final_name;
+    bool need_final_free;
+    Z3_sort bv_sort;
+    uint64_t valueref_size;
 
-/**
-   \brief Create a real variable using the given name.
-*/
-Z3_ast mk_real_var(Z3_context ctx, const char * name) 
-{
-    Z3_sort ty = Z3_mk_real_sort(ctx);
-    return mk_var(ctx, name, ty);
+    need_final_free = false;
+
+    name = LLVMGetValueName(target_cell->valueref);
+
+    valueref_size = get_llvm_type_size(target_cell->valueref);
+    bv_sort = Z3_mk_bv_sort(this->ctx, valueref_size);
+
+    if (*name == 0)
+        name = "_";
+
+    target_cell->name = chunk_calloc(strlen(name)+1);
+    strncpy((char*)target_cell->name.ptr, name, target_cell->name.len);
+    final_name = target_cell->name;
+
+    if (this->prefix.ptr)
+    {
+        final_name = chunk_cat("cc", this->prefix, target_cell->name);
+        need_final_free = true;
+    }
+
+    res = mk_var(this->ctx, (char*)final_name.ptr, bv_sort);
+
+    if (need_final_free)
+        chunk_free(&final_name);
+
+    return res;
 }
 
 Z3_ast create_Z3_var_internal(private_converter_t *this, LLVMValueRef valueref, int need_inc, int read_access)
@@ -1034,26 +1111,6 @@ Z3_ast create_Z3_var_internal(private_converter_t *this, LLVMValueRef valueref, 
 
     target_cell = NULL;
     ctx = this->ctx;
-
-    if (LLVMTypeOf(valueref) == intType(64) || (LLVMTypeOf(valueref) == intPtrType(64)))
-        valueref_size = 64;
-    else if (LLVMTypeOf(valueref) == intType(32) || (LLVMTypeOf(valueref) == intPtrType(32)))
-        valueref_size = 32;
-    else if (LLVMTypeOf(valueref) == intType(16) || (LLVMTypeOf(valueref) == intPtrType(16)))
-        valueref_size = 16;
-    else if (LLVMTypeOf(valueref) == intType(8) || (LLVMTypeOf(valueref) == intPtrType(8)))
-        valueref_size = 8;
-    else if (LLVMTypeOf(valueref) == intType(1) || (LLVMTypeOf(valueref) == intPtrType(1)))
-        valueref_size = 1;
-    else
-    {
-        logging("Size not supported (%x) in create_Z3_var_internal\n", LLVMTypeOf(valueref));
-        logging("int64:%08x pint64:%08x int32:%08x pint32:%08x\n", intType(64), intPtrType(64), intType(32), intPtrType(32));
-        logging("int16:%08x pint16:%08x int8:%08x pint8:%08x\n", intType(16), intPtrType(16), intType(8), intPtrType(8));
-        valueref_size = 0;
-    }
-
-    bv_sort = Z3_mk_bv_sort(ctx, valueref_size);
 
     e = this->Z3_symbol_list->create_enumerator(this->Z3_symbol_list);
 
@@ -1073,6 +1130,10 @@ Z3_ast create_Z3_var_internal(private_converter_t *this, LLVMValueRef valueref, 
 
             target_cell->index++;
 
+            valueref_size = get_llvm_type_size(valueref);
+
+            bv_sort = Z3_mk_bv_sort(ctx, valueref_size);
+
             new_chunk = chunk_calloc(255);
             snprintf((char*) new_chunk.ptr, new_chunk.len, "%s%i", target_cell->name.ptr, target_cell->index);
 
@@ -1089,12 +1150,11 @@ Z3_ast create_Z3_var_internal(private_converter_t *this, LLVMValueRef valueref, 
     }
     else
     {
-        bool need_final_free;
-
-        need_final_free = false;
-
         if ((target_cell = malloc(sizeof(*target_cell))) == NULL)
+        {
             LOG_LLVM("Error while allocating target_cell in create_Z3_var_internal\n");
+            return NULL;
+        }
 
         target_cell->valueref = valueref;
         target_cell->index = 0;
@@ -1103,6 +1163,7 @@ Z3_ast create_Z3_var_internal(private_converter_t *this, LLVMValueRef valueref, 
         target_cell->is_global = LLVMIsAGlobalValue(valueref);
         target_cell->read_access = read_access;
         target_cell->write_access = need_inc;
+        target_cell->ctx = ctx;
 
         type = LLVMGetTypeKind(LLVMTypeOf(valueref));
 
@@ -1113,25 +1174,7 @@ Z3_ast create_Z3_var_internal(private_converter_t *this, LLVMValueRef valueref, 
              */
             case LLVMVoidTypeKind:
             {
-                const char *name;
-                chunk_t final_name;
-
-                name = LLVMGetValueName(valueref);
-                target_cell->name = chunk_calloc(strlen(name)+1);
-                strncpy((char*)target_cell->name.ptr, name, target_cell->name.len);
-                final_name = target_cell->name;
-
-                if (this->prefix.ptr)
-                {
-                    final_name = chunk_cat("cc", this->prefix, target_cell->name);
-                    need_final_free = true;
-                }
-
-                res = mk_var(ctx, (char*)final_name.ptr, bv_sort);
-
-                if (need_final_free)
-                    chunk_free(&final_name);
-
+                res = create_named_var(this, target_cell);
                 break;
             }
             case LLVMIntegerTypeKind:
@@ -1140,35 +1183,19 @@ Z3_ast create_Z3_var_internal(private_converter_t *this, LLVMValueRef valueref, 
                  * ConstInt: dst = src
                  */
                 if (LLVMIsAConstantInt(valueref))
-                    res = Z3_mk_unsigned_int(ctx, LLVMConstIntGetZExtValue(valueref), bv_sort);
+                {
+                    valueref_size = get_llvm_type_size(valueref);
+
+                    bv_sort = Z3_mk_bv_sort(ctx, valueref_size);
+                    res = Z3_mk_unsigned_int64(ctx, LLVMConstIntGetZExtValue(valueref), bv_sort);
+                }
                 /*
                  * Named integer: dst = src
                  */
                 else
                 {
-                    const char *name;
-                    chunk_t final_name;
-
-                    name = LLVMGetValueName(valueref);
-
-                    if (*name == 0)
-                        name = "_";
-
-                    target_cell->name = chunk_calloc(strlen(name)+1);
-                    strncpy((char*)target_cell->name.ptr, name, target_cell->name.len);
-                    final_name = target_cell->name;
-
-                    if (this->prefix.ptr)
-                    {
-                        final_name = chunk_cat("cc", this->prefix, target_cell->name);
-                        need_final_free = true;
-                    }
-
-                    res = mk_var(ctx, (char*)final_name.ptr, bv_sort);
-
-                    if (need_final_free)
-                        chunk_free(&final_name);
-                    }
+                    res = create_named_var(this, target_cell);
+                }
 
                 break;
             }
@@ -1177,30 +1204,14 @@ Z3_ast create_Z3_var_internal(private_converter_t *this, LLVMValueRef valueref, 
              */
             case LLVMPointerTypeKind:
             {
-                const char *name;
-                chunk_t final_name;
-
-                name = LLVMGetValueName(valueref);
-                target_cell->name = chunk_calloc(strlen(name)+1);
-                strncpy((char*)target_cell->name.ptr, name, target_cell->name.len);
-                final_name = target_cell->name;
-
-                if (this->prefix.ptr)
-                {
-                    final_name = chunk_cat("cc", this->prefix, target_cell->name);
-                    need_final_free = true;
-                }
-
-                res = mk_var(ctx, (char*)final_name.ptr, bv_sort);
-
-                if (need_final_free)
-                    chunk_free(&final_name);
+                res = create_named_var(this, target_cell);
                 break;
             }
             default:
             {
                 LOG_LLVM("       Found something BAD: %x\n", type);
                 res = NULL;
+                break;
             }
         }
 
@@ -1229,6 +1240,17 @@ Z3_ast create_Z3_var_inc(private_converter_t *this, LLVMValueRef valueref)
     return create_Z3_var_internal(this, valueref, 1, 0);
 }
 
+void error_handler(Z3_context c, Z3_error_code e)
+{
+    if (!c)
+        printf("No context in error_handler\n");
+
+    printf("[Z3 error handler]\n");
+    printf("Error code: %d\n", e);
+    printf("Error msg : %s\n", Z3_get_error_msg_ex(c, e));
+    exit(0);
+}
+
 static map_t *llvm_to_z3(private_converter_t *this)
 {
     LLVMBasicBlockRef bb;
@@ -1239,14 +1261,19 @@ static map_t *llvm_to_z3(private_converter_t *this)
 
     Z3_ast store_name, Z3_res, args[2];
     Z3_sort bv_sort, array_sort;
+    Z3_sort bv_sort_32, array_sort_32;
     /* Z3_ast ram; */
     Z3_symbol_cell *ram;
+    Z3_symbol_cell *env;
 
     int number_of_operands;
     int operand_num;
 
     bv_sort = Z3_mk_bv_sort(this->ctx, 64);
     array_sort = Z3_mk_array_sort(this->ctx, bv_sort, bv_sort);
+
+    bv_sort_32 = Z3_mk_bv_sort(this->ctx, 32);
+    array_sort_32 = Z3_mk_array_sort(this->ctx, bv_sort_32, bv_sort_32);
 
     bb = LLVMGetFirstBasicBlock(this->Fn);
     insn = LLVMGetFirstInstruction(bb);
@@ -1274,6 +1301,27 @@ static map_t *llvm_to_z3(private_converter_t *this)
         ram->symbol = mk_var(this->ctx, (char*)ram->name.ptr, array_sort);
 
     ram->is_global = 1;
+
+    if ((env = malloc(sizeof(*env))) == NULL)
+        LOG_LLVM("Error while allocating env in llvm_to_z3\n");
+
+    env->valueref = NULL;
+    env->index = 0;
+    env->name = chunk_calloc(255);
+    strncpy((char*)env->name.ptr, "env", env->name.len);
+    env->prefix = chunk_clone(this->prefix);
+
+    if (env->prefix.ptr)
+    {
+        chunk_t env_name;
+        env_name = chunk_cat("cc", env->prefix, env->name);
+        env->symbol = mk_var(this->ctx, (char*)env_name.ptr, array_sort_32);
+        chunk_free(&env_name);
+    }
+    else
+        env->symbol = mk_var(this->ctx, (char*)env->name.ptr, array_sort_32);
+
+    env->is_global = 1;
 
     do
     {
@@ -1366,7 +1414,7 @@ static map_t *llvm_to_z3(private_converter_t *this)
                 Z3_src = create_Z3_var(this, src);
                 Z3_dst = create_Z3_var(this, dst);
 
-                Z3_res = Z3_mk_bvsub(this->ctx, Z3_dst, Z3_src);
+                Z3_res = Z3_mk_bvsub(this->ctx, Z3_src, Z3_dst);
                 break;
             }
             case LLVMFSub:
@@ -1555,10 +1603,20 @@ static map_t *llvm_to_z3(private_converter_t *this)
                      */
                     case LLVMPointerTypeKind:
                     {
+
                         if (LLVMIsAGlobalValue(src))
                             Z3_res = Z3_src;
                         else
-                            Z3_res = Z3_mk_select(this->ctx, ram->symbol, Z3_src);
+                        {
+                            if (get_z3_size(this, Z3_src) == 32)
+                            {
+                                Z3_res = Z3_mk_select(this->ctx, env->symbol, Z3_src);
+                            }
+                            else
+                            {
+                                Z3_res = Z3_mk_select(this->ctx, ram->symbol, Z3_src);
+                            }
+                        }
                         break;
                     }
                     default:
@@ -1580,7 +1638,6 @@ static map_t *llvm_to_z3(private_converter_t *this)
                 dst = LLVMGetOperand(insn, 1);
 
                 Z3_src = create_Z3_var(this, src);
-                Z3_dst = create_Z3_var_inc(this, dst);
 
                 type = LLVMGetTypeKind(LLVMTypeOf(dst));
 
@@ -1591,6 +1648,7 @@ static map_t *llvm_to_z3(private_converter_t *this)
                      */
                     case LLVMIntegerTypeKind:
                     {
+                        Z3_dst = create_Z3_var_inc(this, dst);
                         Z3_res = Z3_mk_eq(this->ctx, Z3_dst, Z3_src);
                         break;
                     }
@@ -1602,6 +1660,7 @@ static map_t *llvm_to_z3(private_converter_t *this)
                         if (LLVMIsAGlobalValue(dst))
                         {
                             //Z3_res = Z3_mk_eq(this->ctx, Z3_dst, Z3_src);
+                            Z3_dst = create_Z3_var_inc(this, dst);
                             store_name = Z3_dst;
                             Z3_res = Z3_src;
                         }
@@ -1611,25 +1670,48 @@ static map_t *llvm_to_z3(private_converter_t *this)
                              * Should be something (= (ram) (store ram val)) as
                              * pointed by the Model if SAT.
                             store_name = mk_var(this->ctx, "JUNK", array_sort);
+                             *
+                             * FIXME
+                             * Something with only get_z3_size
                              */
                             chunk_t new_chunk;
-                            Z3_ast previous_ram;
+                            Z3_ast previous;
+                            Z3_symbol_cell *new;
 
-                            ram->index++;
-                            previous_ram = ram->symbol;
+                            Z3_dst = create_Z3_var(this, dst);
 
                             new_chunk = chunk_calloc(255);
-                            snprintf((char*) new_chunk.ptr, new_chunk.len, "%s%i", ram->name.ptr, ram->index);
 
-                            if (ram->prefix.ptr)
-                                new_chunk = chunk_cat("cm", ram->prefix, new_chunk);
+                            if (get_z3_size(this, Z3_src) == 32)
+                            {
+                                new = env;
+                            }
+                            else
+                            {
+                                new = ram;
+                            }
 
-                            ram->symbol = mk_var(this->ctx, (char*)new_chunk.ptr, array_sort);
+                            new->index++;
+                            previous = new->symbol;
+
+                            snprintf((char*) new_chunk.ptr, new_chunk.len, "%s%i", new->name.ptr, new->index);
+
+                            if (new->prefix.ptr)
+                                new_chunk = chunk_cat("cm", new->prefix, new_chunk);
+
+                            if (get_z3_size(this, Z3_src) == 32)
+                            {
+                                new->symbol = mk_var(this->ctx, (char*)new_chunk.ptr, array_sort_32);
+                            }
+                            else
+                            {
+                                new->symbol = mk_var(this->ctx, (char*)new_chunk.ptr, array_sort);
+                            }
+
+                            store_name = new->symbol;
+                            Z3_res = Z3_mk_store(this->ctx, previous, Z3_dst, Z3_src);
 
                             chunk_clear(&new_chunk);
-
-                            store_name = ram->symbol;
-                            Z3_res = Z3_mk_store(this->ctx, previous_ram, Z3_dst, Z3_src);
                         }
                         break;
                     }
@@ -1647,12 +1729,30 @@ static map_t *llvm_to_z3(private_converter_t *this)
             }
             case LLVMTrunc:
             {
+                LLVMValueRef dst;
+                Z3_ast Z3_dst;
+
                 LOG_LLVM("LLVMTrunc\n");
+
+                dst = LLVMGetOperand(insn, 0);
+
+                Z3_dst = create_Z3_var(this, dst);
+
+                Z3_res = Z3_mk_extract(this->ctx, get_z3_size(this, store_name)-1, 0, Z3_dst);
                 break;
             }
             case LLVMZExt:
             {
+                LLVMValueRef dst;
+                Z3_ast Z3_dst;
+
                 LOG_LLVM("LLVMZExt\n");
+
+                dst = LLVMGetOperand(insn, 0);
+
+                Z3_dst = create_Z3_var(this, dst);
+
+                Z3_res = Z3_mk_zero_ext(this->ctx, get_z3_size(this, store_name) - get_z3_size(this, Z3_dst), Z3_dst);
                 break;
             }
             case LLVMSExt:
@@ -1850,7 +1950,30 @@ static map_t *llvm_to_z3(private_converter_t *this)
         if (Z3_res)
         {
             Z3_ast tmp;
+            uint64_t store_name_size, Z3_res_size;
+
+            store_name_size = get_z3_size(this, store_name);
+            Z3_res_size = get_z3_size(this, Z3_res);
+
+            if (store_name_size > Z3_res_size)
+            {
+                Z3_ast Z3_res_ext;
+
+                Z3_res_ext = Z3_mk_zero_ext(this->ctx, store_name_size - Z3_res_size, Z3_res);
+
+                Z3_res = Z3_res_ext;
+            }
+            else if (store_name_size < Z3_res_size)
+            {
+                Z3_ast Z3_res_trunc;
+
+                Z3_res_trunc = Z3_mk_extract(this->ctx, store_name_size - 1, 0, Z3_res);
+
+                Z3_res = Z3_res_trunc;
+            }
+
             tmp = Z3_mk_eq(this->ctx, store_name, Z3_res);
+
             Z3_res = tmp;
 
             /* Uncomment to dump each instruction 
@@ -1873,6 +1996,11 @@ static map_t *llvm_to_z3(private_converter_t *this)
     chunk_free(&ram->prefix);
 
     free(ram);
+
+    chunk_free(&env->name);
+    chunk_free(&env->prefix);
+
+    free(env);
 
     return map_create(this->ctx, this->formula, this->Z3_symbol_list);
 }
@@ -1897,22 +2025,6 @@ static void set_prefix(private_converter_t *this, chunk_t prefix)
     }
 }
 
-static void destroy_target_cell(void *target_cell)
-{
-    Z3_symbol_cell *c;
-
-    c = (Z3_symbol_cell*) target_cell;
-
-    if ((c) && (c->name.ptr))
-        chunk_clear(&c->name);
-
-    if ((c) && (c->prefix.ptr))
-        chunk_clear(&c->prefix);
-
-    free(target_cell);
-    target_cell = NULL;
-}
-
 static void destroy(private_converter_t *this)
 {
     LLVMDisposePassManager(this->pass_mgr);
@@ -1924,8 +2036,8 @@ static void destroy(private_converter_t *this)
      * freeing.
      *
     Z3_del_context(this->ctx);
-     */
     this->Z3_symbol_list->destroy_function(this->Z3_symbol_list, destroy_target_cell);
+     */
     chunk_clear(&this->prefix);
 
     free(this);
@@ -1940,6 +2052,7 @@ converter_t *converter_create(TCGContext *s, Z3_context ctx)
     this->builder = LLVMCreateBuilder ();
     this->s = s;
     this->rip = NULL;
+    this->df = NULL;
 
     memset(this->m_globalsIdx, 0, sizeof(this->m_globalsIdx));
     memset(this->m_values, 0, sizeof(this->m_values));
@@ -1975,29 +2088,14 @@ converter_t *converter_create(TCGContext *s, Z3_context ctx)
         }
     }
 
-    // Allocate local temps
-    /*
-    for(i=s->nb_globals; i<TCG_MAX_TEMPS; ++i) {
-        if(s->temps[i].temp_local) {
-            //std::ostringstream pName;
-            //pName << "loc_" << (i - s->nb_globals) << "ptr";
-            char *name;
-            if (s->temps[i].name)
-                name = s->temps[i].name;
-            else
-                name = "ALLOA";
-            this->m_memValuesPtr[i] = LLVMBuildAlloca(this->builder,
-                tcgType(s->temps[i].type), name);
-        }
-    }
-    */
-
     LLVMInitializeNativeTarget ();
     LLVMLinkInJIT();
 
     this->ctx = ctx;
     this->formula = Z3_mk_true(this->ctx);
     this->prefix = chunk_empty;
+
+    Z3_set_error_handler(this->ctx, error_handler);
 
     this->Z3_symbol_list = linked_list_create();
 

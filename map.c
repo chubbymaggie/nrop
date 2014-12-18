@@ -4,7 +4,7 @@
 
 #include "map.h"
 
-#define DEBUG_Z3_SOLVE
+//#define DEBUG_Z3_SOLVE
 #ifdef DEBUG_Z3_SOLVE
 #  define LOG_Z3_SOLVE(...) logging(__VA_ARGS__)
 #else
@@ -43,21 +43,21 @@ static void dump(private_map_t *this)
 static Z3_ast mk_var(Z3_context ctx, const char * name, Z3_sort ty) 
 {
     Z3_symbol   s  = Z3_mk_string_symbol(ctx, name);
-    return Z3_mk_const(ctx, s, ty);
+    Z3_ast a = Z3_mk_const(ctx, s, ty);
+    return a;
 }
 
 static gadget_type compare(private_map_t *this, map_t *other)
 {
-    Z3_solver solver, solvernot, solvernot_other;
-    Z3_model model;
+    Z3_solver solver, solvernot;
     enumerator_t *e, *e_other;
     Z3_symbol_cell *c, *c_other;
     linked_list_t *ll_other;
 
-    int solver_res, solver_resnot, solver_resnot_other;
+    int solver_res, solver_resnot;
     gadget_type result;
     bool found_target_register;
-
+    Z3_sort bv_sort;
 
     /*
     Z3_ast target, Z3_rdx, Z3_0;
@@ -98,8 +98,6 @@ static gadget_type compare(private_map_t *this, map_t *other)
     Z3_solver_inc_ref(this->ctx, solver);
     solvernot = Z3_mk_solver(this->ctx);
     Z3_solver_inc_ref(this->ctx, solvernot);
-    solvernot_other = Z3_mk_solver(this->ctx);
-    Z3_solver_inc_ref(this->ctx, solvernot_other);
 
     /*
     LOG_Z3_SOLVE("Making and\n");
@@ -120,9 +118,6 @@ static gadget_type compare(private_map_t *this, map_t *other)
     Z3_solver_assert(this->ctx, solvernot, this->ast);
     Z3_solver_assert(this->ctx, solvernot, other->get_ast(other));
 
-    Z3_solver_assert(this->ctx, solvernot_other, this->ast);
-    Z3_solver_assert(this->ctx, solvernot_other, Z3_mk_not(this->ctx, other->get_ast(other)));
-
     //Z3_set_ast_print_mode(this->ctx, Z3_PRINT_SMTLIB2_COMPLIANT);
     LOG_Z3_SOLVE("Dumping AST:%s\n", Z3_ast_to_string(this->ctx, this->ast));
     LOG_Z3_SOLVE("Dumping ATT:%s\n", Z3_ast_to_string(this->ctx, other->get_ast(other)));
@@ -130,13 +125,20 @@ static gadget_type compare(private_map_t *this, map_t *other)
     e = this->symbols->create_enumerator(this->symbols);
     ll_other = other->get_symbols(other);
 
+    bv_sort = Z3_mk_bv_sort(this->ctx, 64);
+
     while(e->enumerate(e, &c))
     {
         /* For now, must remove after
-         * XXX */
+         * XXX 
         if ((c->name.ptr) && ((strcmp((char*)c->name.ptr, "rip") == 0) ||
             (strcmp((char*)c->name.ptr, "eip") == 0)))
             continue;
+
+        if ((c->name.ptr) && ((strcmp((char*)c->name.ptr, "rsp") == 0) ||
+            (strcmp((char*)c->name.ptr, "esp") == 0)))
+            continue;
+            */
 
         if (!c->is_global)
             continue;
@@ -156,7 +158,6 @@ static gadget_type compare(private_map_t *this, map_t *other)
             {
                 found_target_register = true;
 
-                Z3_sort bv_sort;
                 Z3_ast a, b, eq;
                 chunk_t new_a, new_b, name_a, name_b;
                 bool need_free_name_a, need_free_name_b;
@@ -193,8 +194,6 @@ static gadget_type compare(private_map_t *this, map_t *other)
 
                     snprintf((char*)new_b.ptr, new_b.len, "%s", name_b.ptr);
                     
-                    bv_sort = Z3_mk_bv_sort(this->ctx, 64);
-
                     a = mk_var(this->ctx, (char*)new_a.ptr, bv_sort);
                     b = mk_var(this->ctx, (char*)new_b.ptr, bv_sort);
                     eq = Z3_mk_eq(this->ctx, a, b);
@@ -203,7 +202,6 @@ static gadget_type compare(private_map_t *this, map_t *other)
                     LOG_Z3_SOLVE("Dumping TTI:%s\n", Z3_ast_to_string(this->ctx, eq));
 
                     Z3_solver_assert(this->ctx, solvernot, eq);
-                    Z3_solver_assert(this->ctx, solvernot_other, eq);
 
                     if (need_free_name_a)
                         chunk_free(&name_a);
@@ -250,8 +248,6 @@ static gadget_type compare(private_map_t *this, map_t *other)
                     else
                         snprintf((char*)new_b.ptr, new_b.len, "%s", name_b.ptr);
                     
-                    bv_sort = Z3_mk_bv_sort(this->ctx, 64);
-
                     a = mk_var(this->ctx, (char*)new_a.ptr, bv_sort);
                     b = mk_var(this->ctx, (char*)new_b.ptr, bv_sort);
                     eq = Z3_mk_eq(this->ctx, a, b);
@@ -261,10 +257,16 @@ static gadget_type compare(private_map_t *this, map_t *other)
 
                     if ((strcmp((char*)c->name.ptr, "rsp") == 0) || 
                         (strcmp((char*)c->name.ptr, "esp") == 0))
+                    {
                         Z3_solver_assert(this->ctx, solvernot, eq);
+                    }
                     else
-                        Z3_solver_assert(this->ctx, solvernot, Z3_mk_not(this->ctx, eq));
-                    Z3_solver_assert(this->ctx, solvernot_other, eq);
+                    {
+                        Z3_ast neq;
+
+                        neq = Z3_mk_not(this->ctx, eq);
+                        Z3_solver_assert(this->ctx, solvernot, neq);
+                    }
 
                     if (need_free_name_a)
                         chunk_free(&name_a);
@@ -284,7 +286,7 @@ static gadget_type compare(private_map_t *this, map_t *other)
 
         if (!found_target_register)
         {
-            LOG_Z3_SOLVE("Found bad [%s::%s]\n", c->name.ptr, c_other->name.ptr);
+            LOG_Z3_SOLVE("Found bad [%s]\n", c->name.ptr);
             result = BAD;
             break;
         }
@@ -292,42 +294,42 @@ static gadget_type compare(private_map_t *this, map_t *other)
 
     e->destroy(e);
 
-    if (result == BAD)
-        return result;
 
-    LOG_Z3_SOLVE("Checking\n");
-    solver_res = Z3_solver_check(this->ctx, solver);
-
-    if (solver_res == Z3_L_TRUE)
+    if (result != BAD)
     {
-        solver_resnot = Z3_solver_check(this->ctx, solvernot);
+        LOG_Z3_SOLVE("Checking\n");
+        solver_res = Z3_solver_check(this->ctx, solver);
 
-        if (solver_resnot == Z3_L_FALSE)
+        if (solver_res == Z3_L_TRUE)
         {
-            printf("Found PN2\n");
-            LOG_Z3_SOLVE("Solver: %s\n", Z3_solver_to_string(this->ctx, solvernot));
-            result = PN2;
-        }
-        else
-        {
-            printf("Found PN1\n");
-            result = PN1;
-            model = Z3_solver_get_model(this->ctx, solvernot);
-            LOG_Z3_SOLVE("Model: %s\n", Z3_model_to_string(this->ctx, model));
-            //Z3_model_dec_ref(this->ctx, model);
-        }
+            solver_resnot = Z3_solver_check(this->ctx, solvernot);
+
+            if (solver_resnot == Z3_L_FALSE)
+            {
+                LOG_Z3_SOLVE("Found PN2\n");
+                LOG_Z3_SOLVE("Solver: %s\n", Z3_solver_to_string(this->ctx, solvernot));
+                result = PN2;
+            }
+            else
+            {
+                //Z3_model model;
+                //LOG_Z3_SOLVE("Found PN1\n");
+                result = PN1;
+                //model = Z3_solver_get_model(this->ctx, solvernot);
+                //LOG_Z3_SOLVE("Model: %s\n", Z3_model_to_string(this->ctx, model));
+                //Z3_model_dec_ref(this->ctx, model);
+            }
 
 
-        LOG_Z3_SOLVE("Sat result: %x|%x\n", solver_res, solver_resnot);
+            LOG_Z3_SOLVE("Sat result: %x|%x\n", solver_res, solver_resnot);
+        }
+
+        LOG_Z3_SOLVE("%x:True %x:False %x:Undef\n", Z3_L_TRUE, Z3_L_FALSE, Z3_L_UNDEF);
     }
-
-    LOG_Z3_SOLVE("Checking othernot:%x\n", Z3_solver_check(this->ctx, solvernot_other));
-    LOG_Z3_SOLVE("%x:True %x:False %x:Undef\n", Z3_L_TRUE, Z3_L_FALSE, Z3_L_UNDEF);
-
-    Z3_solver_dec_ref(this->ctx, solvernot_other);
-    Z3_solver_dec_ref(this->ctx, solvernot);
-    Z3_solver_dec_ref(this->ctx, solver);
     
+    Z3_solver_dec_ref(this->ctx, solver);
+    Z3_solver_dec_ref(this->ctx, solvernot);
+
     return result;
 }
 
@@ -381,7 +383,8 @@ map_t *map_create(Z3_context ctx, Z3_ast ast, linked_list_t *symbols)
 
     this->ctx = ctx;
     this->ast = ast;
-    this->symbols = symbols->clone_function(symbols, clone_target_cell);
+    //this->symbols = symbols->clone_function(symbols, clone_target_cell);
+    this->symbols = symbols;
 
     this->public.get_ast = (Z3_ast (*)(map_t *)) get_ast;
     this->public.get_symbols = (linked_list_t *(*)(map_t *)) get_symbols;

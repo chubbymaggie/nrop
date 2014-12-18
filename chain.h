@@ -11,11 +11,15 @@
 #include "linked_list.h"
 #include "xed-interface.h"
 #include "disassembler_xed.h"
+#include "disassembler_capstone.h"
+#include "disassembler_meta.h"
 
 /*
- * Using -isystem qemu te handle warnings
+ * Using -isystem qemu to handle warnings
  */
 #include <include/exec/user/abitypes.h>
+
+#define DISASSINSTANCE create_meta
 
 void gen_intermediate_code(CPUArchState *env, struct TranslationBlock *tb);
 

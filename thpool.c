@@ -56,6 +56,7 @@ thpool_t* thpool_init(int threadsN){
 	tp_p->threads=(pthread_t*)malloc(threadsN*sizeof(pthread_t));          /* MALLOC thread IDs */
 	if (tp_p->threads==NULL){
 		fprintf(stderr, "thpool_init(): Could not allocate memory for thread IDs\n");
+        free(tp_p);
 		return NULL;
 	}
 	tp_p->threadsN=threadsN;
@@ -63,6 +64,8 @@ thpool_t* thpool_init(int threadsN){
 	/* Initialise the job queue */
 	if (thpool_jobqueue_init(tp_p)==-1){
 		fprintf(stderr, "thpool_init(): Could not allocate memory for job queue\n");
+        free(tp_p->threads);
+        free(tp_p);
 		return NULL;
 	}
 	
@@ -73,7 +76,7 @@ thpool_t* thpool_init(int threadsN){
 	/* Make threads in pool */
 	int t;
 	for (t=0; t<threadsN; t++){
-		printf("Created thread %d in pool \n", t);
+		/*printf("Created thread %d in pool \n", t);*/
 		pthread_create(&(tp_p->threads[t]), NULL, (void *)thpool_thread_do, (void *)tp_p); /* MALLOCS INSIDE PTHREAD HERE */
 	}
 	
@@ -115,12 +118,12 @@ void thpool_thread_do(thpool_t* tp_p){
 		}
 		else
 		{
-            printf("good exit\n");
+            /*printf("good exit\n");*/
 			return; /* EXIT thread*/
 		}
 	}
 
-    printf("bad exit: %x\n", thpool_keepalive);
+    //printf("bad exit: %x\n", thpool_keepalive);
 	return;
 }
 

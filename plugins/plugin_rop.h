@@ -13,7 +13,11 @@
 #include "chain.h"
 #include "thpool.h"
 #include "instruction.h"
+
 #include "disassembler_xed.h"
+#include "disassembler_capstone.h"
+
+//#define MULTITHREAD
 
 typedef struct plugin_rop_t plugin_rop_t;
 

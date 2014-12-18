@@ -19,6 +19,8 @@ struct private_disass_xed_t
 {
     disass_xed_t public;
 
+    instruction_t *(*alloc_instruction)(private_disass_xed_t*);
+
     xed_machine_mode_enum_t mmode;
     xed_address_width_enum_t stack_addr_width;
 };
@@ -84,7 +86,7 @@ static uint64_t get_length(private_disass_xed_t *this, instruction_t *i)
     return xed_decoded_inst_get_length(&((xed_instruction_t*) i)->xedd);
 }
 
-static status_t format(private_disass_xed_t *this, instruction_t *i, chunk_t format)
+static status_t format(private_disass_xed_t *this, instruction_t *i, chunk_t *format)
 {
     xed_bool_t ok;
     xed_decoded_inst_t *xedd;
@@ -94,7 +96,7 @@ static status_t format(private_disass_xed_t *this, instruction_t *i, chunk_t for
 
     xedd = &((xed_instruction_t*) i)->xedd;
 
-    ok = xed_format(XED_SYNTAX_INTEL, xedd, (char*)format.ptr, format.len, 0);
+    ok = xed_format(XED_SYNTAX_INTEL, xedd, (char*)format->ptr, format->len, 0);
 
     if (ok)
         return SUCCESS;
@@ -107,7 +109,7 @@ static status_t format(private_disass_xed_t *this, instruction_t *i, chunk_t for
     return SUCCESS;
 }
 
-static status_t dump_intel(private_disass_xed_t *this, instruction_t *i, chunk_t buffer, uint64_t offset_addr)
+static status_t dump_intel(private_disass_xed_t *this, instruction_t *i, chunk_t *buffer, uint64_t offset_addr)
 {
     xed_decoded_inst_t *x;
     xed_bool_t xed_error;
@@ -117,13 +119,16 @@ static status_t dump_intel(private_disass_xed_t *this, instruction_t *i, chunk_t
 
     x = &((xed_instruction_t*) i)->xedd;
 
-    LOG_XED("[XED] dump_intel(%x, %x, %x, %x): %x\n", x, buffer.ptr, buffer.len, offset_addr, *x);
+    LOG_XED("[XED] dump_intel(%x, %x, %x, %x): %x\n", x, buffer->ptr, buffer->len, offset_addr, *x);
 
-    xed_error = xed_decoded_inst_dump_intel_format(x, (char*)buffer.ptr, buffer.len, offset_addr);
+    xed_error = xed_decoded_inst_dump_intel_format(x, (char*)buffer->ptr, buffer->len, offset_addr);
 
     LOG_XED("   = %x\n", xed_error);
 
-    return SUCCESS;
+    if (!xed_error)
+        return FAILED;
+    else
+        return SUCCESS;
 }
 
 static status_t decode(private_disass_xed_t *this, instruction_t **i, chunk_t c)
@@ -132,8 +137,11 @@ static status_t decode(private_disass_xed_t *this, instruction_t **i, chunk_t c)
     xed_error_enum_t xed_error;
     status_t status;
 
-    if ((*i = (instruction_t*) malloc_thing(xed_instruction_t)) == NULL)
+    if ((*i = this->alloc_instruction(this)) == NULL)
+    {
         logging("[x] Error while allocating xed_instruction_t in disassembler_xed.c\n");
+        return FAILED;
+    }
 
     xedd = &((xed_instruction_t*) *i)->xedd;
     LOG_XED("instruction @%x xedd @%x\n", *i, xedd);
@@ -165,6 +173,9 @@ static status_t decode(private_disass_xed_t *this, instruction_t **i, chunk_t c)
 
     if (status == FAILED)
         return status;
+
+    (*i)->bytes = chunk_calloc(xed_decoded_inst_get_length(xedd));
+    memcpy((*i)->bytes.ptr, c.ptr, xed_decoded_inst_get_length(xedd));
 
     /* FIXME
      * Why is this code here??
@@ -220,6 +231,40 @@ static status_t encode(private_disass_xed_t *this, chunk_t *c, instruction_t *i)
     return SUCCESS;
 }
 
+static void *clone_instruction(void *instruction)
+{
+    xed_instruction_t *new_instruction;
+    xed_instruction_t *insn;
+
+    if ((new_instruction = malloc(sizeof(*new_instruction))) == NULL)
+    {
+        LOG_XED("Error while allocating instruction in clone_instruction from chain.c\n");
+        return NULL;
+    }
+
+    memcpy(new_instruction, instruction, sizeof(*new_instruction));
+
+    insn = ((xed_instruction_t*) instruction);
+
+    new_instruction->interface.bytes = chunk_clone(insn->interface.bytes);
+    new_instruction->interface.str = chunk_clone(insn->interface.str);
+
+    return new_instruction;
+}
+
+static void destroy_instruction(void *instruction)
+{
+    xed_instruction_t *insn;
+
+    insn = ((xed_instruction_t*) instruction);
+
+    chunk_clear(&insn->interface.bytes);
+    chunk_clear(&insn->interface.str);
+
+    free(instruction);
+    instruction = NULL;
+}
+
 static instruction_t *alloc_instruction(private_disass_xed_t *this)
 {
     xed_instruction_t *new_insn;
@@ -233,37 +278,14 @@ static instruction_t *alloc_instruction(private_disass_xed_t *this)
         return NULL;
     }
 
+    new_insn->interface.bytes = chunk_empty;
+    new_insn->interface.str = chunk_empty;
+    new_insn->interface.clone = (instruction_t *(*)(instruction_t *)) clone_instruction;
+    new_insn->interface.destroy = (void (*)(instruction_t *)) destroy_instruction;
+
     return (instruction_t*) new_insn;
 }
 
-static void *clone_instruction(void *instruction)
-{
-    xed_decoded_inst_t *new_instruction;
-
-    if ((new_instruction = malloc(sizeof(xed_decoded_inst_t))) == NULL)
-    {
-        LOG_XED("Error while allocating instruction in clone_instruction from chain.c\n");
-        return NULL;
-    }
-
-    memcpy(new_instruction, instruction, sizeof(xed_decoded_inst_t));
-
-    return new_instruction;
-}
-
-static void destroy_instruction(void *instruction)
-{
-    free(instruction);
-    instruction = NULL;
-}
-
-static uint64_t get_instruction_size(private_disass_xed_t *this)
-{
-    if (!this)
-        return FAILED;
-
-    return sizeof(xed_instruction_t);
-}
 
 static void destroy(private_disass_xed_t *this)
 {
@@ -288,18 +310,16 @@ disass_xed_t *create_xed()
 
     xed_format_set_options( format_options );
 
+    this->alloc_instruction = (instruction_t *(*)(private_disass_xed_t*)) alloc_instruction;
+
     /* Interface implementation */
     this->public.interface.initialize = (status_t (*)(disassembler_t*, chunk_t)) initialize;
     this->public.interface.get_category = (category_t (*)(disassembler_t*, instruction_t*)) get_category;
     this->public.interface.get_length = (uint64_t (*)(disassembler_t*, instruction_t*)) get_length;
-    this->public.interface.format = (status_t (*)(disassembler_t*, instruction_t *, chunk_t)) format;
-    this->public.interface.dump_intel = (status_t (*)(disassembler_t*, instruction_t *, chunk_t, uint64_t)) dump_intel;
+    this->public.interface.format = (status_t (*)(disassembler_t*, instruction_t *, chunk_t *)) format;
+    this->public.interface.dump_intel = (status_t (*)(disassembler_t*, instruction_t *, chunk_t *, uint64_t)) dump_intel;
     this->public.interface.decode = (status_t (*)(disassembler_t*, instruction_t **, chunk_t)) decode;
     this->public.interface.encode = (status_t (*)(disassembler_t*, chunk_t *, instruction_t *)) encode;
-    this->public.interface.alloc_instruction = (instruction_t *(*)(disassembler_t*)) alloc_instruction;
-    this->public.interface.clone_instruction = (void *(*)(void *)) clone_instruction;
-    this->public.interface.destroy_instruction = (void (*)(void *)) destroy_instruction;
-    this->public.interface.get_instruction_size = (uint64_t (*)(disassembler_t*)) get_instruction_size;
     this->public.interface.destroy = (void (*)(disassembler_t*)) destroy;
 
     return &this->public;

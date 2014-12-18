@@ -9,16 +9,16 @@ typedef struct instruction_t instruction_t;
 
 struct instruction_t
 {
-    /**
-     * Add instruction bytes to instruction.
-     *
-     * @param insn      the byte to add.
-     * @return          SUCCESS if the byte was successfully added, FAILED otherwise
-     */
-    status_t (*add_chunk)(instruction_t*, chunk_t);
+    chunk_t bytes;
+    chunk_t str;
 
     /**
-     * Destroys an instruction_t object.
+     * Clone an instruction_t object. Is implemented by the disassembler.
+     */
+    instruction_t *(*clone)(instruction_t *);
+
+    /**
+     * Destroys an instruction_t object. Implemented by the disassembler.
      */
     void (*destroy)(instruction_t *);
 };
@@ -30,7 +30,8 @@ typedef enum
     UNCOND_BR,
     SYSCALL,
     CALL,
-    RET
+    RET,
+    ERR,
 } category_t;
 
 instruction_t *create_instruction(chunk_t bytes);

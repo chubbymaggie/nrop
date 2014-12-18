@@ -55,7 +55,20 @@ static char *get_str(private_chain_t *this)
 
 static void set_instructions(private_chain_t *this, linked_list_t *instructions)
 {
-    this->instructions = instructions->clone_function(instructions, this->d->clone_instruction);
+    enumerator_t *e;
+    instruction_t *instruction;
+
+	linked_list_t *clone = linked_list_create();
+
+    e = instructions->create_enumerator(instructions);
+
+    while (e->enumerate(e, &instruction))
+        clone->insert_last(clone, instruction->clone(instruction));
+
+    e->destroy(e);
+
+    //this->instructions = instructions->clone_function(instructions, this->d->clone_instruction);
+    this->instructions = clone;
 }
 
 static linked_list_t *get_instructions(private_chain_t *this)
@@ -81,7 +94,9 @@ static void set_Z3_context(private_chain_t *this, Z3_context ctx)
     this->ctx = ctx;
 }
 
-pthread_mutex_t map_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t qemu_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t llvm_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t z3_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static map_t *get_map(private_chain_t *this)
 {
@@ -99,14 +114,12 @@ static map_t *get_map_prefix(private_chain_t *this, chunk_t prefix)
 
     CPUArchState *env;
     CPUState *cpu;
-    /*    
     TranslationBlock *tb;
-    */
     TCGContext *s;
 
     converter_t *converter;
 
-    hexdump(this->chunk.ptr, this->chunk.len);
+    //hexdump(this->chunk.ptr, this->chunk.len);
 /*
 #0  tcg_gen_code (s=s@entry=0x62362ea0 <tcg_ctx>, gen_code_buf=0x6035f820 <static_code_gen_buffer> "") at /home/dad/Outils/packerLLVM/qemu/tcg/tcg.c:2585
 #1  0x00000000600d03c7 in cpu_x86_gen_code (env=env@entry=0x623c6950, tb=tb@entry=0x7ffff2875010, gen_code_size_ptr=gen_code_size_ptr@entry=0x7fffffffd304)
@@ -123,29 +136,37 @@ static map_t *get_map_prefix(private_chain_t *this, chunk_t prefix)
 #9  0x00000000600087a5 in _start ()
     */
 
-    pthread_mutex_lock(&map_lock);
+    pthread_mutex_lock(&qemu_lock);
 
     env = cpu_init("qemu64");
     cpu = ENV_GET_CPU(env); 
-    //tb = tb_gen_code(cpu, (uint64_t) this->chunk.ptr, 0, 0x40c0b3, 0);
-    tb_gen_code(cpu, (uint64_t) this->chunk.ptr, 0, 0x40c0b3, 0);
+    tb = tb_gen_code(cpu, (uint64_t) this->chunk.ptr, 0, 0x40c0b3, 0);
+    //tb_gen_code(cpu, (uint64_t) this->chunk.ptr, 0, 0x40c0b3, 0);
 
     s = get_tcg_ctx();
-    tcg_dump_ops(s);
+    //tcg_dump_ops(s);
 
     if (this->ctx == NULL)
         LOG_CHAIN("The Z3 context is NULL, will segfault\n");
 
+    pthread_mutex_unlock(&qemu_lock);
+    pthread_mutex_lock(&llvm_lock);
+
     converter = converter_create(s, this->ctx);
     converter->set_prefix(converter, prefix);
     converter->tcg_to_llvm(converter);
-    converter->dump(converter);
+    //converter->dump(converter);
+
+    pthread_mutex_unlock(&llvm_lock);
+    //pthread_mutex_lock(&z3_lock);
 
     map = converter->llvm_to_z3(converter);
 
     converter->destroy(converter);
 
-    pthread_mutex_unlock(&map_lock);
+    tb_free(tb);
+
+    //pthread_mutex_unlock(&z3_lock);
 
     /*
     chain_list = this->public.get_instructions(&this->public);
@@ -166,13 +187,23 @@ static map_t *get_map_prefix(private_chain_t *this, chunk_t prefix)
 
 static void destroy(private_chain_t *this)
 {
+    enumerator_t *e;
+    instruction_t *instruction;
+
     free(this->str);
     this->str = NULL;
 
     chunk_clear(&this->chunk);
     this->chunk = chunk_empty;
 
-    this->instructions->destroy_function(this->instructions, this->d->destroy_instruction);
+    e = this->instructions->create_enumerator(this->instructions);
+
+    while (e->enumerate(e, &instruction))
+        instruction->destroy(instruction);
+
+    this->instructions->destroy(this->instructions);
+
+    e->destroy(e);
 
     free(this);
     this = NULL;
@@ -182,7 +213,7 @@ chain_t *chain_create_from_string(chunk_t type, uint64_t addr, chunk_t chunk_str
 {
     disassembler_t *d;
 
-    d = (disassembler_t*) create_xed();
+    d = (disassembler_t*) DISASSINSTANCE();
     d->initialize(d, type);
 
     LOG_CHAIN("Creating chain of type %s[%u] @%x : %s\n", type.ptr, type.len, addr, chunk_str.ptr);
@@ -235,8 +266,10 @@ chain_t *chain_create_from_string_disass(disassembler_t *d, uint64_t addr, chunk
         LOG_CHAIN("%s\n", buf);
         */
         format_chunk = chunk_calloc(4096);
-        d->dump_intel(d, instruction, format_chunk, addr);
-        LOG_CHAIN("%s\n", format_chunk.ptr);
+        if (d->dump_intel(d, instruction, &format_chunk, addr) == FAILED)
+            LOG_CHAIN("[x] Error while dump_intel in chain.c\n");
+
+        LOG_CHAIN("create from string_disass %s\n", format_chunk.ptr);
 
         chunk_free(&format_chunk);
 
@@ -256,7 +289,7 @@ chain_t *chain_create_from_insn(chunk_t type, uint64_t addr, linked_list_t *inst
 {
     disassembler_t *d;
 
-    d = (disassembler_t*) create_xed();
+    d = (disassembler_t*) DISASSINSTANCE();
     d->initialize(d, type);
 
     return chain_create_from_insn_disass(d, addr, instructions);
@@ -266,6 +299,7 @@ chain_t *chain_create_from_insn_disass(disassembler_t *d, uint64_t addr, linked_
 {
     char *insns_str;
     chunk_t insns_chunk;
+    chunk_t tmp_insns_chunk;
     enumerator_t *e;
     uint64_t offset_addr;
     chain_t *ret_chain;
@@ -287,17 +321,28 @@ chain_t *chain_create_from_insn_disass(disassembler_t *d, uint64_t addr, linked_
     {
         chunk_t new_str;
         chunk_t new_chunk;
+        bool need_free_str;
+        bool need_free_chunk;
 
-        new_str = chunk_calloc(4096);
+        /**
+         * Create string representation
+         */
+        need_free_str = false;
+        new_str = instruction->str;
 
-        LOG_CHAIN("dumping instruction %x %x\n", instruction);
-        d->dump_intel(d, instruction, new_str, offset_addr);
+        LOG_CHAIN("new str is %x:%x\n", new_str.ptr, new_str.len);
 
-        if (d->encode(d, &new_chunk, instruction) == FAILED)
+        if (new_str.ptr == chunk_empty.ptr)
         {
-            LOG_CHAIN("Error while encoding chunk in chain_create_from_insn\n");
-            return NULL;
+            new_str = chunk_calloc(4096);
+
+            LOG_CHAIN("dumping @instruction %x:%x\n", instruction, offset_addr);
+            d->dump_intel(d, instruction, &new_str, offset_addr);
+
+            need_free_str = true;
         }
+
+        LOG_CHAIN("new str is now %x:%x\n", new_str.ptr, new_str.len);
 
         if (strlen(insns_str) > 0)
         {
@@ -308,11 +353,38 @@ chain_t *chain_create_from_insn_disass(disassembler_t *d, uint64_t addr, linked_
         else
             sprintf(insns_str, "%s ;", (char*) new_str.ptr);
 
-        insns_chunk = chunk_cat("mm", insns_chunk, new_chunk);
+        /**
+         * Create bytes representing the instruction
+         */
+        need_free_chunk = false;
+        new_chunk = instruction->bytes;
+        LOG_CHAIN("new chunk is %x:%x\n", new_chunk.ptr, new_chunk.len);
+
+        if (new_chunk.ptr == chunk_empty.ptr)
+        {
+            if (d->encode(d, &new_chunk, instruction) == FAILED)
+            {
+                LOG_CHAIN("Error while encoding chunk in chain_create_from_insn\n");
+                break;
+            }
+
+            need_free_chunk = true;
+        }
+
+        LOG_CHAIN("new chunk is %x:%x\n", new_chunk.ptr, new_chunk.len);
+
+        tmp_insns_chunk = chunk_cat("cc", insns_chunk, new_chunk);
+        chunk_clear(&insns_chunk);
+
+        insns_chunk.ptr = tmp_insns_chunk.ptr;
+        insns_chunk.len = tmp_insns_chunk.len;
+
+        if (need_free_str)
+            chunk_clear(&new_str);
+        if (need_free_chunk)
+            chunk_clear(&new_chunk);
 
         offset_addr+= d->get_length(d, instruction);
-
-        chunk_clear(&new_str);
     }
 
     e->destroy(e);
